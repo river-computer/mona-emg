@@ -1,0 +1,60 @@
+# GRU + CTC Phoneme Model Configuration
+# Optimized for AWS g5.xlarge (NVIDIA A10G 24GB)
+
+# Data settings
+data:
+  data_root: "data/raw"
+  testset_file: "data/raw/testset_largedev.json"
+  text_align_dir: "data/raw/text_alignments"
+  normalizer_path: "checkpoints/normalizer.npz"
+  use_silent: true
+  use_voiced: true
+  cache_features: true
+
+# Model architecture
+model:
+  input_dim: 112          # EMG features (8 channels x 14 features)
+  hidden_dim: 768         # GRU hidden size (matches NEJM)
+  num_layers: 5           # GRU depth (matches NEJM)
+  num_phonemes: 48        # Phoneme vocabulary size
+  dropout: 0.4            # Dropout rate
+  bidirectional: true     # Use BiGRU
+
+# Training settings
+training:
+  # Optimization
+  batch_size: 32          # Effective batch size
+  gradient_accumulation: 2  # Accumulate gradients for larger effective batch
+  max_epochs: 100
+
+  # Learning rate
+  learning_rate: 3e-4
+  lr_warmup_steps: 1000
+  lr_scheduler: "cosine"  # cosine or step
+  lr_min: 1e-5
+
+  # Regularization
+  weight_decay: 1e-5
+  grad_clip: 5.0
+
+  # Checkpointing
+  checkpoint_dir: "checkpoints"
+  save_every: 5           # Save every N epochs
+  log_every: 100          # Log every N steps
+  val_every: 1            # Validate every N epochs
+
+# Evaluation
+evaluation:
+  beam_width: 1           # 1 = greedy decoding
+  use_lm: false           # Language model (future work)
+
+# Hardware
+device: "cuda"
+num_workers: 4
+pin_memory: true
+
+# Experiment tracking
+experiment:
+  name: "gru_ctc_baseline"
+  seed: 42
+  tensorboard_dir: "runs"

@@ -1,0 +1,27 @@
+# Core ML
+torch>=2.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Audio/Signal processing
+librosa>=0.10.0
+soundfile>=0.12.0
+
+# TextGrid parsing for phoneme labels
+textgrids>=1.4.0
+praatio>=6.0.0
+
+# Text processing
+jiwer>=3.0.0
+unidecode>=1.3.0
+
+# Training utilities
+tqdm>=4.65.0
+omegaconf>=2.3.0
+tensorboard>=2.13.0
+
+# DTW for silent/voiced alignment
+fastdtw>=0.3.4
+
+# Optional: beam search CTC decoder (may require compilation)
+# ctcdecode>=1.0.0
