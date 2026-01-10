@@ -8,8 +8,8 @@ librosa>=0.10.0
 soundfile>=0.12.0
 
 # TextGrid parsing for phoneme labels
-textgrids>=1.4.0
 praatio>=6.0.0
+tgt>=1.4.4
 
 # Text processing
 jiwer>=3.0.0

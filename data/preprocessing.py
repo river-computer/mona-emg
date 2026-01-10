@@ -256,18 +256,21 @@ def read_phonemes(textgrid_path: str, max_len: int = None) -> np.ndarray:
         phone_ids: (frames,) array of phoneme indices
     """
     import string
-    from textgrids import TextGrid
+    from praatio import textgrid as tgio
 
-    tg = TextGrid(textgrid_path)
+    tg = tgio.openTextgrid(textgrid_path, includeEmptyIntervals=True)
+
+    # Get phones tier
+    phones_tier = tg.getTier('phones')
 
     # Initialize array
-    end_time = tg['phones'][-1].xmax
+    end_time = phones_tier.entries[-1].end
     phone_ids = np.zeros(int(end_time * FRAME_RATE) + 1, dtype=np.int64)
     phone_ids[:] = -1
     phone_ids[-1] = PHONEME_INVENTORY.index('sil')
 
-    for interval in tg['phones']:
-        phone = interval.text.lower()
+    for interval in phones_tier.entries:
+        phone = interval.label.lower()
 
         # Normalize silence markers
         if phone in ['', 'sp', 'spn']:
@@ -278,8 +281,8 @@ def read_phonemes(textgrid_path: str, max_len: int = None) -> np.ndarray:
             phone = phone[:-1]
 
         ph_id = PHONEME_INVENTORY.index(phone)
-        start_frame = int(interval.xmin * FRAME_RATE)
-        end_frame = int(interval.xmax * FRAME_RATE)
+        start_frame = int(interval.start * FRAME_RATE)
+        end_frame = int(interval.end * FRAME_RATE)
         phone_ids[start_frame:end_frame] = ph_id
 
     assert (phone_ids >= 0).all(), 'Missing aligned phones'
