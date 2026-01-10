@@ -19,6 +19,7 @@ unidecode>=1.3.0
 tqdm>=4.65.0
 omegaconf>=2.3.0
 tensorboard>=2.13.0
+wandb>=0.15.0
 
 # DTW for silent/voiced alignment
 fastdtw>=0.3.4

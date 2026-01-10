@@ -6,6 +6,7 @@ Usage:
     python train.py
     python train.py --config custom_config.yaml
     python train.py training.batch_size=64 model.hidden_dim=512
+    python train.py wandb.enabled=false  # disable wandb
 """
 
 import os
@@ -22,6 +23,13 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from omegaconf import OmegaConf
 from tqdm import tqdm
+
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    wandb = None
 
 from data.dataset import EMGPhonemeDataset, collate_fn
 from data.preprocessing import FeatureNormalizer, PHONEME_INVENTORY
@@ -111,6 +119,7 @@ def train_epoch(
     epoch: int,
     writer: SummaryWriter,
     global_step: int,
+    use_wandb: bool = False,
 ) -> tuple:
     """Train for one epoch."""
     model.train()
@@ -154,8 +163,19 @@ def train_epoch(
             # Logging
             if global_step % cfg.training.log_every == 0:
                 lr = scheduler.get_last_lr()[0]
-                writer.add_scalar('train/loss', loss.item() * accumulation_steps, global_step)
+                step_loss = loss.item() * accumulation_steps
+
+                # TensorBoard
+                writer.add_scalar('train/loss', step_loss, global_step)
                 writer.add_scalar('train/lr', lr, global_step)
+
+                # Wandb
+                if use_wandb:
+                    wandb.log({
+                        'train/loss': step_loss,
+                        'train/lr': lr,
+                        'global_step': global_step,
+                    }, step=global_step)
 
         total_loss += loss.item() * accumulation_steps
         num_batches += 1
@@ -234,6 +254,24 @@ def main():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_name = f"{cfg.experiment.name}_{timestamp}"
     writer = SummaryWriter(log_dir=f"{cfg.experiment.tensorboard_dir}/{run_name}")
+
+    # Initialize Wandb
+    use_wandb = cfg.wandb.enabled and WANDB_AVAILABLE
+    if cfg.wandb.enabled and not WANDB_AVAILABLE:
+        logger.warning("wandb requested but not installed. Install with: pip install wandb")
+
+    if use_wandb:
+        wandb.init(
+            project=cfg.wandb.project,
+            entity=cfg.wandb.entity,
+            name=run_name,
+            config=OmegaConf.to_container(cfg, resolve=True),
+            tags=cfg.wandb.tags,
+            notes=cfg.wandb.notes,
+        )
+        # Log code
+        wandb.run.log_code(".", include_fn=lambda path: path.endswith(".py"))
+        logger.info(f"Wandb run: {wandb.run.url}")
 
     # Create datasets
     logger.info("Loading datasets...")
@@ -322,6 +360,10 @@ def main():
     total_steps = len(train_loader) * cfg.training.max_epochs // cfg.training.gradient_accumulation
     scheduler = get_scheduler(optimizer, cfg, total_steps)
 
+    # Watch model with wandb
+    if use_wandb:
+        wandb.watch(model, log='all', log_freq=100)
+
     # Training loop
     best_per = float('inf')
     global_step = 0
@@ -331,7 +373,7 @@ def main():
     for epoch in range(1, cfg.training.max_epochs + 1):
         # Train
         train_loss, global_step = train_epoch(
-            model, train_loader, optimizer, scheduler, cfg, device, epoch, writer, global_step
+            model, train_loader, optimizer, scheduler, cfg, device, epoch, writer, global_step, use_wandb
         )
         logger.info(f"Epoch {epoch} - Train loss: {train_loss:.4f}")
         writer.add_scalar('epoch/train_loss', train_loss, epoch)
@@ -346,9 +388,20 @@ def main():
             writer.add_scalar('epoch/val_loss', val_metrics['loss'], epoch)
             writer.add_scalar('epoch/val_per', val_metrics['per'], epoch)
 
+            # Wandb epoch logging
+            if use_wandb:
+                wandb.log({
+                    'epoch': epoch,
+                    'epoch/train_loss': train_loss,
+                    'epoch/val_loss': val_metrics['loss'],
+                    'epoch/val_per': val_metrics['per'],
+                    'epoch/best_per': best_per,
+                }, step=global_step)
+
             # Save best model
             if val_metrics['per'] < best_per:
                 best_per = val_metrics['per']
+                best_model_path = checkpoint_dir / 'best_model.pt'
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': model.state_dict(),
@@ -356,8 +409,14 @@ def main():
                     'val_per': val_metrics['per'],
                     'val_loss': val_metrics['loss'],
                     'config': OmegaConf.to_container(cfg),
-                }, checkpoint_dir / 'best_model.pt')
+                }, best_model_path)
                 logger.info(f"Saved best model with PER: {best_per*100:.2f}%")
+
+                # Log best model to wandb
+                if use_wandb:
+                    wandb.save(str(best_model_path))
+                    wandb.run.summary['best_per'] = best_per
+                    wandb.run.summary['best_epoch'] = epoch
 
         # Regular checkpoint
         if epoch % cfg.training.save_every == 0:
@@ -369,6 +428,11 @@ def main():
             }, checkpoint_dir / f'checkpoint_epoch{epoch}.pt')
 
     writer.close()
+
+    # Finish wandb run
+    if use_wandb:
+        wandb.finish()
+
     logger.info(f"Training complete. Best PER: {best_per*100:.2f}%")
 
 

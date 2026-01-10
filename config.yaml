@@ -58,3 +58,11 @@ experiment:
   name: "gru_ctc_baseline"
   seed: 42
   tensorboard_dir: "runs"
+
+# Weights & Biases
+wandb:
+  enabled: true
+  project: "emg-phoneme-ctc"
+  entity: null  # Your wandb username/team (null = default)
+  tags: ["gru", "ctc", "phoneme", "gaddy"]
+  notes: "Pure GRU + CTC baseline for EMG phoneme prediction"
