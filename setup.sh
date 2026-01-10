@@ -35,9 +35,16 @@ cd "$DATA_DIR"
 
 download_from_s3() {
     echo "Attempting to download from S3 cache..."
-    if aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/" &> /dev/null; then
+    if aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/emg_data.tar.gz" &> /dev/null; then
         echo "S3 cache found. Downloading..."
-        aws s3 sync "s3://${S3_BUCKET}/${S3_PREFIX}/" . --quiet
+        aws s3 cp "s3://${S3_BUCKET}/${S3_PREFIX}/emg_data.tar.gz" . --quiet
+        aws s3 cp "s3://${S3_BUCKET}/${S3_PREFIX}/text_alignments.tar.gz" . --quiet
+        aws s3 cp "s3://${S3_BUCKET}/${S3_PREFIX}/testset_largedev.json" . --quiet
+
+        # Extract
+        echo "Extracting data..."
+        tar -xzf emg_data.tar.gz
+        tar -xzf text_alignments.tar.gz
         return 0
     else
         echo "S3 cache not found."
@@ -51,13 +58,13 @@ download_from_zenodo() {
     # EMG data (~3GB)
     if [ ! -f "emg_data.tar.gz" ]; then
         echo "Downloading emg_data.tar.gz..."
-        wget -q --show-progress https://zenodo.org/record/4064408/files/emg_data.tar.gz
+        wget -q --show-progress https://zenodo.org/records/4064409/files/emg_data.tar.gz
     fi
 
     # Text alignments (~50MB)
     if [ ! -f "text_alignments.tar.gz" ]; then
         echo "Downloading text_alignments.tar.gz..."
-        wget -q --show-progress https://zenodo.org/record/4064408/files/text_alignments.tar.gz
+        wget -q --show-progress https://zenodo.org/records/4064409/files/text_alignments.tar.gz
     fi
 
     # Testset file
@@ -79,9 +86,9 @@ download_from_zenodo() {
 upload_to_s3() {
     echo "Uploading to S3 cache for future use..."
     if aws s3 ls "s3://${S3_BUCKET}/" &> /dev/null; then
-        # Upload extracted data (faster than tar.gz for subsequent downloads)
-        aws s3 sync emg_data "s3://${S3_BUCKET}/${S3_PREFIX}/emg_data/" --quiet &
-        aws s3 sync text_alignments "s3://${S3_BUCKET}/${S3_PREFIX}/text_alignments/" --quiet &
+        # Upload tarred files
+        aws s3 cp emg_data.tar.gz "s3://${S3_BUCKET}/${S3_PREFIX}/emg_data.tar.gz" --quiet &
+        aws s3 cp text_alignments.tar.gz "s3://${S3_BUCKET}/${S3_PREFIX}/text_alignments.tar.gz" --quiet &
         aws s3 cp testset_largedev.json "s3://${S3_BUCKET}/${S3_PREFIX}/testset_largedev.json" --quiet &
         wait
         echo "S3 upload complete."
