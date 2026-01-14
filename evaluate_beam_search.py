@@ -36,41 +36,74 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def setup_beam_decoder(lm_path: str = None, beam_width: int = 100, alpha: float = 0.5, beta: float = 1.0):
-    """Setup CTC beam decoder with optional KenLM."""
+def setup_beam_decoder(beam_width: int = 100):
+    """Setup CTC beam decoder."""
     from pyctcdecode import build_ctcdecoder
 
-    # Labels for decoder (phonemes)
+    # Labels for decoder - pyctcdecode adds blank at end automatically
+    # Labels should NOT include blank
     labels = PHONEME_INVENTORY.copy()
 
-    # Note: DeepSpeech LM is word-level, won't help for phoneme decoding
-    # Just use beam search without LM for now
     decoder = build_ctcdecoder(labels=labels)
 
     return decoder, beam_width
 
 
-def decode_batch_beam(model, decoder, beam_width, emg_features, emg_lengths, device):
+def decode_batch_beam(model, decoder, beam_width, emg_features, emg_lengths, device, debug=False):
     """Decode a batch using beam search."""
     model.eval()
     with torch.no_grad():
         logits = model(emg_features, emg_lengths)
-        log_probs = F.softmax(logits, dim=-1).cpu().numpy()
+        # pyctcdecode expects softmax probabilities with blank as LAST column
+        probs = F.softmax(logits, dim=-1).cpu().numpy()
 
         predictions = []
         for i, length in enumerate(emg_lengths):
-            # Get logits for this sample (up to actual length)
-            sample_probs = log_probs[i, :length.item(), :]
+            # Get probs for this sample (up to actual length)
+            sample_probs = probs[i, :length.item(), :]
 
             # Beam search decode
-            text = decoder.decode(sample_probs, beam_width=beam_width)
+            try:
+                # Get beams with scores for debugging
+                beams = decoder.decode_beams(sample_probs, beam_width=beam_width)
+                if beams:
+                    text = beams[0][0]  # First beam, text part
+                else:
+                    text = ""
+
+                if debug and i == 0:
+                    logger.info(f"Sample probs shape: {sample_probs.shape}")
+                    logger.info(f"Decoded text: '{text}'")
+                    logger.info(f"Num beams: {len(beams)}")
+                    if beams:
+                        logger.info(f"Top beam: {beams[0]}")
+
+            except Exception as e:
+                logger.warning(f"Decode error: {e}")
+                text = ""
 
             # Convert back to phoneme IDs
-            phonemes = text.split()
+            # pyctcdecode joins multi-char tokens, need to parse carefully
             phoneme_ids = []
-            for p in phonemes:
-                if p in PHONEME_INVENTORY:
-                    phoneme_ids.append(PHONEME_INVENTORY.index(p))
+            if text:
+                # Try to split by known phonemes
+                remaining = text
+                while remaining:
+                    found = False
+                    # Try longer phonemes first (e.g., "ng" before "n")
+                    for plen in [3, 2, 1]:
+                        for p in PHONEME_INVENTORY:
+                            if len(p) == plen and remaining.startswith(p):
+                                phoneme_ids.append(PHONEME_INVENTORY.index(p))
+                                remaining = remaining[len(p):]
+                                found = True
+                                break
+                        if found:
+                            break
+                    if not found:
+                        # Skip unknown character
+                        remaining = remaining[1:] if remaining else ""
+
             predictions.append(phoneme_ids)
 
         return predictions
@@ -157,10 +190,7 @@ def main():
 
     # Setup beam decoder
     logger.info(f"Setting up beam decoder (width={args.beam_width})...")
-    decoder, beam_width = setup_beam_decoder(
-        lm_path=args.lm_path if Path(args.lm_path).exists() else None,
-        beam_width=args.beam_width,
-    )
+    decoder, beam_width = setup_beam_decoder(beam_width=args.beam_width)
 
     # Run evaluation
     all_beam_preds = []
@@ -168,6 +198,7 @@ def main():
     all_targets = []
 
     logger.info("Running evaluation...")
+    first_batch = True
     for batch in tqdm(dataloader, desc="Evaluating"):
         emg_features = batch['emg_features'].to(device)
         emg_lengths = batch['emg_lengths'].to(device)
@@ -175,7 +206,8 @@ def main():
         phoneme_lengths = batch['phoneme_lengths']
 
         # Beam search decoding
-        beam_preds = decode_batch_beam(model, decoder, beam_width, emg_features, emg_lengths, device)
+        beam_preds = decode_batch_beam(model, decoder, beam_width, emg_features, emg_lengths, device, debug=first_batch)
+        first_batch = False
         all_beam_preds.extend(beam_preds)
 
         # Greedy decoding (for comparison)
