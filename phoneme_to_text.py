@@ -6,14 +6,17 @@ Takes EMG model phoneme predictions, uses Claude/OpenAI to decode to text,
 and computes Word Error Rate against ground truth.
 
 Usage:
+    # Zero-shot with OpenAI GPT-5.2
+    python phoneme_to_text.py --input test_results.csv --provider openai --model gpt-5.2
+
     # Zero-shot with Claude
     python phoneme_to_text.py --input test_results.csv --provider anthropic --model claude-sonnet-4-20250514
 
     # Few-shot with OpenAI
-    python phoneme_to_text.py --input test_results.csv --provider openai --model gpt-4o --mode few-shot
+    python phoneme_to_text.py --input test_results.csv --provider openai --model gpt-5.2 --mode few-shot
 
     # Test with limit
-    python phoneme_to_text.py --input test_results.csv --provider anthropic --model claude-sonnet-4-20250514 --limit 10
+    python phoneme_to_text.py --input test_results.csv --provider openai --model gpt-5.2 --limit 10
 """
 
 import argparse
@@ -22,7 +25,6 @@ import csv
 import time
 import random
 from pathlib import Path
-from tqdm import tqdm
 
 try:
     import jiwer
@@ -72,24 +74,55 @@ def get_anthropic_client():
     return anthropic_client
 
 
-def load_test_results(csv_path: str) -> list[dict]:
-    """Load test results from CSV."""
+def load_test_results(file_path: str) -> list[dict]:
+    """Load test results from CSV or JSONL."""
     samples = []
-    with open(csv_path, 'r') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            if not row.get('text', '').strip():
-                continue
 
-            samples.append({
-                'trial_id': row.get('trial_id', ''),
-                'phonemes': row['prediction'],  # predicted phonemes
-                'ground_truth_phonemes': row['ground_truth'],
-                'ground_truth_text': row['text'],
-                'per': float(row.get('per', 0)),
-                'confidence': float(row.get('confidence', 0)),
-                'is_silent': row.get('is_silent', 'False') == 'True',
-            })
+    if file_path.endswith('.jsonl'):
+        # Load from JSONL (fine-tuning format)
+        with open(file_path, 'r') as f:
+            for i, line in enumerate(f):
+                data = json.loads(line)
+                messages = data.get('messages', [])
+
+                # Extract phonemes (user message) and ground truth (assistant message)
+                phonemes = ''
+                ground_truth_text = ''
+                for msg in messages:
+                    if msg['role'] == 'user':
+                        phonemes = msg['content']
+                    elif msg['role'] == 'assistant':
+                        ground_truth_text = msg['content']
+
+                if not ground_truth_text.strip():
+                    continue
+
+                samples.append({
+                    'trial_id': str(i),
+                    'phonemes': phonemes,
+                    'ground_truth_phonemes': '',
+                    'ground_truth_text': ground_truth_text,
+                    'per': 0.0,
+                    'confidence': 0.0,
+                    'is_silent': False,
+                })
+    else:
+        # Load from CSV
+        with open(file_path, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if not row.get('text', '').strip():
+                    continue
+
+                samples.append({
+                    'trial_id': row.get('trial_id', ''),
+                    'phonemes': row['prediction'],  # predicted phonemes
+                    'ground_truth_phonemes': row['ground_truth'],
+                    'ground_truth_text': row['text'],
+                    'per': float(row.get('per', 0)),
+                    'confidence': float(row.get('confidence', 0)),
+                    'is_silent': row.get('is_silent', 'False') == 'True',
+                })
     return samples
 
 
@@ -120,39 +153,69 @@ def format_few_shot_examples(examples: list[dict]) -> str:
 
 
 def call_openai(model: str, system_prompt: str, user_content: str, max_retries: int = 10) -> tuple[str, dict]:
-    """Call OpenAI API with retry logic."""
+    """Call OpenAI API with retry logic. Uses Responses API for gpt-5+ models."""
     from openai import RateLimitError, APIError, APITimeoutError
 
     client = get_openai_client()
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_content}
-    ]
+
+    # Use Responses API for GPT-5+ models
+    use_responses_api = model.startswith('gpt-5')
 
     for attempt in range(max_retries):
         try:
             start_time = time.perf_counter()
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                max_completion_tokens=256,
-                temperature=0,
-            )
-            elapsed_ms = (time.perf_counter() - start_time) * 1000
 
-            return response.choices[0].message.content.strip(), {
-                'time_ms': round(elapsed_ms, 2),
-                'tokens_in': response.usage.prompt_tokens,
-                'tokens_out': response.usage.completion_tokens,
-            }
+            if use_responses_api:
+                # New Responses API format
+                response = client.responses.create(
+                    model=model,
+                    instructions=system_prompt,
+                    input=user_content,
+                )
+                elapsed_ms = (time.perf_counter() - start_time) * 1000
+
+                # Extract text from response
+                output_text = response.output_text if hasattr(response, 'output_text') else ""
+                if not output_text:
+                    for item in response.output:
+                        if hasattr(item, 'content'):
+                            for content in item.content:
+                                if hasattr(content, 'text'):
+                                    output_text = content.text
+                                    break
+
+                return output_text.strip(), {
+                    'time_ms': round(elapsed_ms, 2),
+                    'tokens_in': response.usage.input_tokens if hasattr(response, 'usage') else 0,
+                    'tokens_out': response.usage.output_tokens if hasattr(response, 'usage') else 0,
+                }
+            else:
+                # Legacy Chat Completions API
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content}
+                ]
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    max_completion_tokens=256,
+                    temperature=0,
+                )
+                elapsed_ms = (time.perf_counter() - start_time) * 1000
+
+                return response.choices[0].message.content.strip(), {
+                    'time_ms': round(elapsed_ms, 2),
+                    'tokens_in': response.usage.prompt_tokens,
+                    'tokens_out': response.usage.completion_tokens,
+                }
 
         except RateLimitError:
             wait = min(60, 2 ** attempt) + random.uniform(0, 1)
-            tqdm.write(f"Rate limit. Waiting {wait:.1f}s...")
+            print(f"Rate limit. Waiting {wait:.1f}s...")
             time.sleep(wait)
         except (APIError, APITimeoutError) as e:
             wait = 2 ** attempt + random.uniform(0, 1)
-            tqdm.write(f"API error: {e}. Retrying in {wait:.1f}s...")
+            print(f"API error: {e}. Retrying in {wait:.1f}s...")
             time.sleep(wait)
 
     return "ERROR: Max retries exceeded", {'time_ms': 0, 'tokens_in': 0, 'tokens_out': 0}
@@ -183,11 +246,11 @@ def call_anthropic(model: str, system_prompt: str, user_content: str, max_retrie
 
         except anthropic.RateLimitError:
             wait = min(60, 2 ** attempt) + random.uniform(0, 1)
-            tqdm.write(f"Rate limit. Waiting {wait:.1f}s...")
+            print(f"Rate limit. Waiting {wait:.1f}s...")
             time.sleep(wait)
         except anthropic.APIError as e:
             wait = 2 ** attempt + random.uniform(0, 1)
-            tqdm.write(f"API error: {e}. Retrying in {wait:.1f}s...")
+            print(f"API error: {e}. Retrying in {wait:.1f}s...")
             time.sleep(wait)
 
     return "ERROR: Max retries exceeded", {'time_ms': 0, 'tokens_in': 0, 'tokens_out': 0}
@@ -218,27 +281,62 @@ def calculate_wer(predictions: list[str], references: list[str]) -> dict:
             total_errors += abs(len(pred_words) - len(ref_words))
         return {'wer': total_errors / total_words if total_words > 0 else 0}
 
-    # Use jiwer for proper WER
-    measures = jiwer.compute_measures(references, predictions)
-    return {
-        'wer': measures['wer'],
-        'mer': measures['mer'],
-        'wil': measures['wil'],
-        'substitutions': measures['substitutions'],
-        'insertions': measures['insertions'],
-        'deletions': measures['deletions'],
-        'hits': measures['hits'],
-    }
+    # Use jiwer for proper WER (newer API)
+    wer = jiwer.wer(references, predictions)
+
+    # Try to get detailed metrics if available
+    try:
+        output = jiwer.process_words(references, predictions)
+        return {
+            'wer': wer,
+            'substitutions': output.substitutions,
+            'insertions': output.insertions,
+            'deletions': output.deletions,
+            'hits': output.hits,
+        }
+    except:
+        return {'wer': wer}
 
 
 def run_inference(provider: str, model: str, system_prompt: str, samples: list[dict]) -> list[dict]:
-    """Run inference on all samples."""
+    """Run inference on all samples, printing per-sample results."""
     results = []
+    running_wer_sum = 0.0
+    running_wer_count = 0
 
     call_fn = call_openai if provider == 'openai' else call_anthropic
 
-    for sample in tqdm(samples, desc=f"Running inference ({provider})"):
+    print(f"\n{'='*80}")
+    print(f"{'#':<4} {'PER':<8} {'WER':<8} {'Pred':<30} {'GT':<30}")
+    print(f"{'='*80}")
+
+    for i, sample in enumerate(samples):
         prediction, stats = call_fn(model, system_prompt, sample['phonemes'])
+
+        # Calculate per-sample WER
+        pred_norm = normalize_text(prediction)
+        gt_norm = normalize_text(sample['ground_truth_text'])
+
+        if JIWER_AVAILABLE and gt_norm:
+            try:
+                sample_wer = jiwer.wer(gt_norm, pred_norm)
+            except:
+                sample_wer = 1.0
+        else:
+            sample_wer = 0.0
+
+        # Update running WER
+        running_wer_sum += sample_wer
+        running_wer_count += 1
+        running_wer = running_wer_sum / running_wer_count
+
+        # Print per-sample result
+        per_pct = sample['per'] * 100
+        wer_pct = sample_wer * 100
+        pred_short = prediction[:28] + '..' if len(prediction) > 30 else prediction
+        gt_short = sample['ground_truth_text'][:28] + '..' if len(sample['ground_truth_text']) > 30 else sample['ground_truth_text']
+
+        print(f"{i+1:<4} {per_pct:<7.1f}% {wer_pct:<7.1f}% {pred_short:<30} {gt_short:<30}")
 
         results.append({
             'trial_id': sample['trial_id'],
@@ -247,10 +345,17 @@ def run_inference(provider: str, model: str, system_prompt: str, samples: list[d
             'ground_truth_text': sample['ground_truth_text'],
             'ground_truth_phonemes': sample['ground_truth_phonemes'],
             'per': sample['per'],
+            'sample_wer': sample_wer,
             'confidence': sample['confidence'],
             'is_silent': sample['is_silent'],
             **stats,
         })
+
+        # Print running WER every 10 samples
+        if (i + 1) % 10 == 0:
+            print(f"--- Running WER after {i+1} samples: {running_wer*100:.2f}% ---")
+
+    print(f"{'='*80}")
 
     return results
 
@@ -321,8 +426,8 @@ def main():
     results = run_inference(args.provider, args.model, system_prompt, samples)
     total_time = time.time() - start_time
 
-    # Calculate WER
-    print(f"\nCalculating WER...")
+    # Calculate final WER
+    print(f"\nCalculating final WER...")
     predictions = [normalize_text(r['predicted_text']) for r in results]
     references = [normalize_text(r['ground_truth_text']) for r in results]
 
@@ -330,14 +435,6 @@ def main():
     for r, pred_norm, ref_norm in zip(results, predictions, references):
         r['predicted_text_normalized'] = pred_norm
         r['ground_truth_text_normalized'] = ref_norm
-        # Per-sample WER
-        if JIWER_AVAILABLE:
-            try:
-                r['sample_wer'] = jiwer.wer(ref_norm, pred_norm)
-            except:
-                r['sample_wer'] = 1.0
-        else:
-            r['sample_wer'] = 0.0
 
     wer_metrics = calculate_wer(predictions, references)
 
