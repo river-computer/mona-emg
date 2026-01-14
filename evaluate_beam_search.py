@@ -40,25 +40,12 @@ def setup_beam_decoder(lm_path: str = None, beam_width: int = 100, alpha: float 
     """Setup CTC beam decoder with optional KenLM."""
     from pyctcdecode import build_ctcdecoder
 
-    # Labels for decoder (phonemes + blank represented as "")
+    # Labels for decoder (phonemes)
     labels = PHONEME_INVENTORY.copy()
 
-    if lm_path and Path(lm_path).exists():
-        logger.info(f"Loading KenLM from {lm_path}")
-        # For phoneme-level LM, we'd need a phoneme LM, not word LM
-        # The DeepSpeech LM is word-level, so we'll skip it for now
-        decoder = build_ctcdecoder(
-            labels=labels,
-            kenlm_model=None,  # Word-level LM won't help for phonemes
-            alpha=alpha,
-            beta=beta,
-        )
-    else:
-        decoder = build_ctcdecoder(
-            labels=labels,
-            alpha=alpha,
-            beta=beta,
-        )
+    # Note: DeepSpeech LM is word-level, won't help for phoneme decoding
+    # Just use beam search without LM for now
+    decoder = build_ctcdecoder(labels=labels)
 
     return decoder, beam_width
 
