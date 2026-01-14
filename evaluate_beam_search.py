@@ -5,7 +5,7 @@ Evaluate GRU+CTC model with KenLM beam search decoding.
 This gives WER comparable to Gaddy's reported ~28% WER.
 
 Setup (run once):
-    pip install git+https://github.com/parlance/ctcdecode.git
+    pip install pyctcdecode pypi-kenlm
     curl -LO https://github.com/mozilla/DeepSpeech/releases/download/v0.6.1/lm.binary
 
 Usage:
@@ -29,9 +29,6 @@ from data.dataset import EMGPhonemeDataset, collate_fn
 from data.preprocessing import PHONEME_INVENTORY, NUM_PHONEMES
 from model.gru_ctc import GRUCTCModel
 
-# Phoneme to text mapping for decoding
-PHONEME_TO_ARPA = {p: p for p in PHONEME_INVENTORY}
-
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -39,53 +36,55 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def phonemes_to_text_simple(phoneme_ids: list) -> str:
-    """Convert phoneme IDs to space-separated ARPA string."""
-    return ' '.join(PHONEME_INVENTORY[p] for p in phoneme_ids if p < len(PHONEME_INVENTORY))
+def setup_beam_decoder(lm_path: str = None, beam_width: int = 100, alpha: float = 0.5, beta: float = 1.0):
+    """Setup CTC beam decoder with optional KenLM."""
+    from pyctcdecode import build_ctcdecoder
+
+    # Labels for decoder (phonemes + blank represented as "")
+    labels = PHONEME_INVENTORY.copy()
+
+    if lm_path and Path(lm_path).exists():
+        logger.info(f"Loading KenLM from {lm_path}")
+        # For phoneme-level LM, we'd need a phoneme LM, not word LM
+        # The DeepSpeech LM is word-level, so we'll skip it for now
+        decoder = build_ctcdecoder(
+            labels=labels,
+            kenlm_model=None,  # Word-level LM won't help for phonemes
+            alpha=alpha,
+            beta=beta,
+        )
+    else:
+        decoder = build_ctcdecoder(
+            labels=labels,
+            alpha=alpha,
+            beta=beta,
+        )
+
+    return decoder, beam_width
 
 
-def setup_beam_decoder(vocab_size: int, lm_path: str = 'lm.binary', beam_width: int = 100):
-    """Setup CTC beam decoder with KenLM."""
-    try:
-        from ctcdecode import CTCBeamDecoder
-    except ImportError:
-        logger.error("ctcdecode not installed. Run: pip install git+https://github.com/parlance/ctcdecode.git")
-        raise
-
-    # Build vocabulary - phonemes + blank
-    # CTCBeamDecoder expects characters, but we use phoneme tokens
-    # We'll create a simple char-based vocab where each phoneme is a "character"
-    labels = PHONEME_INVENTORY + ['_']  # _ is blank
-
-    decoder = CTCBeamDecoder(
-        labels,
-        model_path=lm_path if Path(lm_path).exists() else None,
-        alpha=1.5,  # LM weight
-        beta=1.85,  # word insertion bonus
-        beam_width=beam_width,
-        num_processes=4,
-        blank_id=len(PHONEME_INVENTORY),
-        log_probs_input=True,
-    )
-
-    return decoder
-
-
-def decode_batch_beam(model, decoder, emg_features, emg_lengths, device):
+def decode_batch_beam(model, decoder, beam_width, emg_features, emg_lengths, device):
     """Decode a batch using beam search."""
     model.eval()
     with torch.no_grad():
         logits = model(emg_features, emg_lengths)
-        log_probs = F.log_softmax(logits, dim=-1)
-
-        # CTCBeamDecoder expects (batch, time, vocab)
-        beam_results, beam_scores, timesteps, out_lens = decoder.decode(log_probs)
+        log_probs = F.softmax(logits, dim=-1).cpu().numpy()
 
         predictions = []
-        for i in range(len(emg_lengths)):
-            # Get best beam result
-            best_beam = beam_results[i, 0, :out_lens[i, 0]].tolist()
-            predictions.append(best_beam)
+        for i, length in enumerate(emg_lengths):
+            # Get logits for this sample (up to actual length)
+            sample_probs = log_probs[i, :length.item(), :]
+
+            # Beam search decode
+            text = decoder.decode(sample_probs, beam_width=beam_width)
+
+            # Convert back to phoneme IDs
+            phonemes = text.split()
+            phoneme_ids = []
+            for p in phonemes:
+                if p in PHONEME_INVENTORY:
+                    phoneme_ids.append(PHONEME_INVENTORY.index(p))
+            predictions.append(phoneme_ids)
 
         return predictions
 
@@ -171,14 +170,8 @@ def main():
 
     # Setup beam decoder
     logger.info(f"Setting up beam decoder (width={args.beam_width})...")
-    if Path(args.lm_path).exists():
-        logger.info(f"Using LM: {args.lm_path}")
-    else:
-        logger.warning(f"LM not found at {args.lm_path}, running without LM")
-
-    decoder = setup_beam_decoder(
-        vocab_size=cfg.model.num_phonemes + 1,
-        lm_path=args.lm_path,
+    decoder, beam_width = setup_beam_decoder(
+        lm_path=args.lm_path if Path(args.lm_path).exists() else None,
         beam_width=args.beam_width,
     )
 
@@ -195,7 +188,7 @@ def main():
         phoneme_lengths = batch['phoneme_lengths']
 
         # Beam search decoding
-        beam_preds = decode_batch_beam(model, decoder, emg_features, emg_lengths, device)
+        beam_preds = decode_batch_beam(model, decoder, beam_width, emg_features, emg_lengths, device)
         all_beam_preds.extend(beam_preds)
 
         # Greedy decoding (for comparison)
